@@ -1,23 +1,18 @@
+# Окружение и секреты
+.venv/
+venv/
+.env
+
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-venv/
-env/
-.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# AI Models & Data
-*.bin
-*.gguf
-*.pt
-*.safetensors
+# Артефакты рантайма
+logs/
 models/
-weights/
-data/
-
-# IDE & OS
-.vscode/
-.cursor/
-.idea/
-.DS_Store
-Thumbs.db
+recordings/
+*.log

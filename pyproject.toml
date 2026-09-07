@@ -1,0 +1,23 @@
+[project]
+name = "ai-streamer"
+version = "0.1.0"
+description = "Локальный ИИ-стример для Twitch (RTX 4080 16GB / Ryzen 5900X)"
+requires-python = ">=3.11,<3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # кириллица в строках и комментариях — это норма
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

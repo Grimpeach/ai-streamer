@@ -1,0 +1,81 @@
+# =============================================================================
+# AI Streamer — зависимости
+# Целевая среда: Python 3.11 (x64), CUDA 12.4, Windows 10 / RTX 4080 16GB
+#
+# Установка:
+#   py -3.11 -m venv .venv
+#   .venv\Scripts\Activate.ps1
+#   python -m pip install --upgrade pip wheel
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+#
+# Отдельно (не ставится из этого файла, нужен свой индекс/сборка):
+#   * llama-cpp-python с CUDA:
+#       pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+#   * vLLM работает только под Linux — запускать в WSL2 либо использовать
+#     llama.cpp server как OpenAI-совместимый бэкенд (см. LLM__BASE_URL).
+#   * CosyVoice ставится из исходников (git clone + pip install -e .).
+# =============================================================================
+
+# --- Ядро: конфигурация, логирование, асинхронность ---------------------------
+pydantic>=2.9,<3
+pydantic-settings>=2.6,<3
+python-dotenv>=1.0
+loguru>=0.7.2
+anyio>=4.6
+tenacity>=9.0
+orjson>=3.10
+winloop>=0.1.7; sys_platform == "win32"
+
+# --- CUDA 12 стек (ставить с --extra-index-url .../whl/cu124) ------------------
+torch==2.5.1
+torchaudio==2.5.1
+numpy>=1.26,<3
+scipy>=1.14
+
+# --- STT: Faster-Whisper для Push-to-Talk (~1-1.5 GB VRAM) --------------------
+faster-whisper>=1.1.0
+ctranslate2>=4.5.0
+av>=13.1
+
+# --- VAD: детекция речи хоста -------------------------------------------------
+silero-vad>=5.1
+onnxruntime-gpu>=1.20
+webrtcvad-wheels>=2.0.14
+
+# --- Аудио ввод/вывод и перехват PTT ------------------------------------------
+sounddevice>=0.5.1
+soundfile>=0.12.1
+keyboard>=0.13.5; sys_platform == "win32"
+pynput>=1.7.7
+
+# --- LLM: OpenAI-совместимый клиент к vLLM / llama.cpp server -----------------
+httpx[http2]>=0.27
+openai>=1.55
+transformers>=4.46
+tokenizers>=0.20
+
+# --- TTS: стриминговый синтез (~3-4 GB VRAM) ----------------------------------
+kokoro>=0.9.4
+misaki>=0.9.4
+phonemizer>=3.3
+
+# --- Twitch: чтение чата (IRC) ------------------------------------------------
+# Версия 3.x — другой API (EventSub вместо IRC), несовместима с src/modules/twitch.
+twitchio>=2.10,<3
+# Опционально для Фазы 3 (EventSub: реальные донаты Streamlabs/DonationAlerts):
+# twitchAPI>=4.3
+
+# --- Память: Redis (краткосрочная) и Qdrant (векторная) -----------------------
+redis[hiredis]>=5.2
+qdrant-client>=1.12
+sentence-transformers>=3.3
+
+# --- Аватар и оверлеи ---------------------------------------------------------
+pyvts>=0.3.3
+websockets>=13.1
+
+# --- Разработка и тесты -------------------------------------------------------
+pytest>=8.3
+pytest-asyncio>=0.24
+ruff>=0.8
+mypy>=1.13
