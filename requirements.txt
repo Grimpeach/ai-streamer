@@ -33,6 +33,8 @@ numpy>=1.26,<3
 scipy>=1.14
 
 # --- STT: Faster-Whisper для Push-to-Talk (~1-1.5 GB VRAM) --------------------
+# На Windows cuBLAS берётся из torch/lib (см. src/core/cuda.py). Отдельный
+# CUDA Toolkit не обязателен, если установлен torch с CUDA 12.
 faster-whisper>=1.1.0
 ctranslate2>=4.5.0
 av>=13.1

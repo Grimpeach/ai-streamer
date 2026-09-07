@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from src.core.config import Settings, load_settings
+from src.core.cuda import ensure_windows_cuda_dlls
 from src.core.event_bus import EventBus
 from src.core.events import (
     AnyEvent,
@@ -270,9 +271,10 @@ async def run_ptt_only(bus: EventBus, settings: Settings, stop: asyncio.Event) -
         return 1
 
     log.info(
-        "Говорите, удерживая '{}'. Отпускание запускает STT '{}'.",
+        "Говорите, удерживая '{}'. Отпускание запускает STT '{}' ({}).",
         settings.ptt.hotkey,
         settings.stt.model,
+        ptt.stt_device,
     )
     try:
         await stop.wait()
@@ -313,6 +315,7 @@ async def amain(args: CliArgs) -> int:
         return 78  # EX_CONFIG
 
     setup_logging(settings.log_level, log_file=settings.log_file)
+    ensure_windows_cuda_dlls()
 
     log.info("{} v0 запускается (demo={})", settings.app_name, settings.demo_mode)
     log.info(

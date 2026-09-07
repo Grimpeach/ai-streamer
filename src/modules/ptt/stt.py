@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.core.config import STTSettings
+from src.core.cuda import ensure_windows_cuda_dlls, is_missing_cuda_runtime
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -57,6 +58,9 @@ class WhisperTranscriber:
         self.settings = settings
         self._model: Any | None = None
         self._executor: ThreadPoolExecutor | None = None
+        #: Фактическое устройство после возможного fallback на CPU.
+        self.device = settings.device
+        self.compute_type = settings.compute_type
 
     @property
     def loaded(self) -> bool:
@@ -71,14 +75,20 @@ class WhisperTranscriber:
             return
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
         logger.info(
-            "Загружаю STT '{}' на {} ({}), первый запуск скачивает веса",
+            "Загружаю STT '{}' на {} ({})",
             self.settings.model,
             self.settings.device,
             self.settings.compute_type,
         )
         started = time.monotonic()
         await self._run(self._load_sync)
-        logger.info("STT готов за {:.1f}с (~{} ГБ VRAM)", time.monotonic() - started, self.settings.vram_gb)
+        logger.info(
+            "STT готов за {:.1f}с ({} / {}, ~{} ГБ VRAM)",
+            time.monotonic() - started,
+            self.device,
+            self.compute_type,
+            self.settings.vram_gb if self.device == "cuda" else 0,
+        )
 
         if self.settings.warmup:
             await self._warmup()
@@ -92,13 +102,14 @@ class WhisperTranscriber:
             await asyncio.to_thread(executor.shutdown, True)
 
     async def _warmup(self) -> None:
-        """Гоняет модель по секунде тишины, чтобы прогреть CUDA-кернелы."""
-        import numpy as np
+        """Прогоняет энкодер по короткому тону — не тишине.
 
+        VAD на нулях пропускает ``encode()``, и отсутствующий cuBLAS всплывает
+        только когда хост реально заговорил.
+        """
         started = time.monotonic()
-        silence = np.zeros(16_000, dtype="float32")
-        await self.transcribe(silence, 16_000)
-        logger.info("STT прогрет за {:.1f}с", time.monotonic() - started)
+        await self._run(self._probe_encoder)
+        logger.info("STT прогрет за {:.1f}с ({})", time.monotonic() - started, self.device)
 
     # ------------------------------------------------------------------ inference
 
@@ -118,14 +129,58 @@ class WhisperTranscriber:
     # --------------------------------------------------- синхронная часть (в потоке)
 
     def _load_sync(self) -> None:
+        ensure_windows_cuda_dlls()
+        try:
+            self._model = self._create_model(self.settings.device, self.settings.compute_type)
+            self.device = self.settings.device
+            self.compute_type = self.settings.compute_type
+            if self.device == "cuda":
+                self._probe_encoder()
+        except Exception as exc:
+            if not (
+                self.settings.device == "cuda"
+                and self.settings.fallback_to_cpu
+                and is_missing_cuda_runtime(exc)
+            ):
+                raise
+            logger.warning(
+                "CUDA STT недоступен ({}). Переключаюсь на CPU (int8), "
+                "чтобы PTT продолжал работать без CUDA Toolkit.",
+                exc,
+            )
+            self._model = None
+            self._model = self._create_model("cpu", "int8")
+            self.device = "cpu"
+            self.compute_type = "int8"
+
+    def _create_model(self, device: str, compute_type: str) -> Any:
         from faster_whisper import WhisperModel
 
-        self._model = WhisperModel(
+        return WhisperModel(
             self.settings.model,
-            device=self.settings.device,
-            compute_type=self.settings.compute_type,
+            device=device,
+            compute_type=compute_type,
             download_root=str(self.settings.download_root) if self.settings.download_root else None,
         )
+
+    def _probe_encoder(self) -> None:
+        """Один короткий encode, чтобы поймать отсутствие cuBLAS на старте."""
+        import numpy as np
+
+        if self._model is None:
+            return
+        samples = 8_000  # 0.5 с при 16 кГц — достаточно, чтобы VAD не выкинул тон
+        t = np.linspace(0, 0.5, samples, dtype=np.float32)
+        tone = (0.08 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
+        segments, _info = self._model.transcribe(
+            tone,
+            language=self.settings.language,
+            beam_size=1,
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        for _segment in segments:
+            break
 
     def _transcribe_sync(self, audio: Any, sample_rate: int) -> Transcript:
         """Синхронный инференс. Выполняется только в потоке STT."""

@@ -68,6 +68,11 @@ class PushToTalkModule(Module):
         """Зажата ли клавиша PTT прямо сейчас."""
         return self._held
 
+    @property
+    def stt_device(self) -> str:
+        """Фактическое устройство STT после возможного fallback на CPU."""
+        return self._transcriber.device
+
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
@@ -85,9 +90,10 @@ class PushToTalkModule(Module):
             raise
         self._started = True
         self.log.info(
-            "PTT активен: клавиша '{}' прерывает генерацию мгновенно, STT '{}'",
+            "PTT активен: клавиша '{}' прерывает генерацию мгновенно, STT '{}' на {}",
             self.settings.hotkey,
             self.stt_settings.model,
+            self._transcriber.device,
         )
 
     async def stop(self) -> None:
