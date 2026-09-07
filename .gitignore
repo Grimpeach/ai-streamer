@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# AI Models & Data
+*.bin
+*.gguf
+*.pt
+*.safetensors
+models/
+weights/
+data/
+
+# IDE & OS
+.vscode/
+.cursor/
+.idea/
+.DS_Store
+Thumbs.db
