@@ -1,8 +1,8 @@
 """Долгосрочная память на Qdrant: факты о зрителях и событиях стрима.
 
 Эмбеддер держится на GPU и учитывается в бюджете VRAM
-(``memory.vram_gb``), поэтому модель загружается лениво — только при первом
-обращении к семантическому поиску.
+(``memory.vram_gb``). Модель грузится при ``connect()`` модуля памяти,
+чтобы первый ответ в чат не ждал загрузки весов.
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ class LongTermMemory:
                 vectors_config=VectorParams(size=self.settings.embedding_dim, distance=Distance.COSINE),
             )
             logger.info("Создана коллекция Qdrant '{}'", self.settings.qdrant_collection)
+        await self._ensure_author_index()
         logger.info("Qdrant подключён: {}", self.settings.qdrant_url)
 
     async def close(self) -> None:
@@ -61,18 +62,27 @@ class LongTermMemory:
         self._embedder = None
 
     def _load_embedder(self) -> Any:
-        """Лениво загружает модель эмбеддингов на CUDA."""
+        """Лениво загружает модель эмбеддингов на CUDA, с запасным вариантом на CPU."""
         if self._embedder is None:
             from sentence_transformers import SentenceTransformer
 
-            self._embedder = SentenceTransformer(self.settings.embedding_model, device="cuda")
-            logger.info("Эмбеддер загружен: {}", self.settings.embedding_model)
+            device = "cpu"
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    device = "cuda"
+            except ImportError:
+                pass
+            self._embedder = SentenceTransformer(self.settings.embedding_model, device=device)
+            logger.info("Эмбеддер загружен: {} ({})", self.settings.embedding_model, device)
         return self._embedder
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         """Считает эмбеддинги (блокирующая операция — вызывать через to_thread)."""
         model = self._load_embedder()
-        vectors = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        prepared = [_e5_prefix(text, is_query=is_query, model=self.settings.embedding_model) for text in texts]
+        vectors = model.encode(prepared, normalize_embeddings=True, show_progress_bar=False)
         return [vector.tolist() for vector in vectors]
 
     async def remember(self, text: str, *, author: str = "", kind: str = "fact") -> str:
@@ -80,8 +90,8 @@ class LongTermMemory:
         from qdrant_client.models import PointStruct
 
         client = self._require()
-        vector = (await asyncio.to_thread(self.embed, [text]))[0]
-        point_id = uuid.uuid4().hex
+        vector = (await asyncio.to_thread(self.embed, [text], is_query=False))[0]
+        point_id = str(uuid.uuid4())
         await client.upsert(
             collection_name=self.settings.qdrant_collection,
             points=[
@@ -94,16 +104,59 @@ class LongTermMemory:
         )
         return point_id
 
-    async def recall(self, query: str, *, limit: int | None = None) -> list[MemoryHit]:
-        """Ищет релевантные факты по смыслу запроса."""
+    async def recall(
+        self,
+        query: str,
+        *,
+        author: str = "",
+        limit: int | None = None,
+    ) -> list[MemoryHit]:
+        """Ищет релевантные факты по смыслу запроса и, если есть, по нику."""
         client = self._require()
-        vector = (await asyncio.to_thread(self.embed, [query]))[0]
-        result = await client.query_points(
-            collection_name=self.settings.qdrant_collection,
-            query=vector,
-            limit=limit or self.settings.top_k,
-            with_payload=True,
-        )
+        vector = (await asyncio.to_thread(self.embed, [query], is_query=True))[0]
+        top = limit or self.settings.top_k
+        hits = await self._query(client, vector, top, author=author)
+        if author and not hits:
+            hits = await self._query(client, vector, top, author="")
+        min_score = self.settings.min_score
+        return [hit for hit in hits if hit.score >= min_score or min_score <= 0]
+
+    async def _ensure_author_index(self) -> None:
+        """Индекс по нику, чтобы фильтр recall не сканировал всю коллекцию."""
+        from qdrant_client.models import PayloadSchemaType
+
+        if self._client is None:
+            return
+        try:
+            await self._client.create_payload_index(
+                collection_name=self.settings.qdrant_collection,
+                field_name="author",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            logger.debug("Индекс Qdrant author уже есть или не создался")
+
+    async def _query(
+        self,
+        client: Any,
+        vector: list[float],
+        limit: int,
+        *,
+        author: str,
+    ) -> list[MemoryHit]:
+        kwargs: dict[str, Any] = {
+            "collection_name": self.settings.qdrant_collection,
+            "query": vector,
+            "limit": limit,
+            "with_payload": True,
+        }
+        if author:
+            from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+            kwargs["query_filter"] = Filter(
+                must=[FieldCondition(key="author", match=MatchValue(value=author))]
+            )
+        result = await client.query_points(**kwargs)
         hits: list[MemoryHit] = []
         for point in result.points:
             payload = point.payload or {}
@@ -122,3 +175,11 @@ class LongTermMemory:
         if self._client is None:
             raise RuntimeError("LongTermMemory не подключена: вызовите connect()")
         return self._client
+
+
+def _e5_prefix(text: str, *, is_query: bool, model: str) -> str:
+    """multilingual-e5 ожидает префиксы query:/passage:."""
+    if "e5" not in model.lower():
+        return text
+    tag = "query: " if is_query else "passage: "
+    return tag + text

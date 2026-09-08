@@ -69,21 +69,26 @@ with bus.preemption_scope("llm") as token:
 Хук клавиатуры PTT и аудио-колбэк PortAudio живут вне event loop, поэтому
 публикуют события через `publish_threadsafe()` (внутри — `call_soon_threadsafe`).
 
-## 5. Конвейер Фазы 1
+## 5. Конвейер Фазы 4
 
 ```
 twitch.chat (P3) ─┐
-twitch.donation (P2) ─┼─> brain.route ──> llm.request ──> LLM (stream)
-ptt.host_speech (P1) ─┘                                    │
-                                                           ├─> llm.chunk   (оверлей/сабы)
-                                                           └─> tts.request (по фразам)
-                                                                    │
-                                                                    └─> tts.chunk ──> аудио
+twitch.donation (P2) ─┼─> memory.ingest ──> Redis / Qdrant
+ptt.host_speech (P1) ─┘         │
+                                ▼
+                         llm.generate (stream=True, + context_for)
+                                │
+                                ├─> llm.chunk
+                                └─> tts.request  (паузы: , . ! ?)
+                                         │
+                                         ├─> Kokoro (thread) ──> sounddevice
+                                         └─> tts.chunk
 ```
 
 Нарезка ответа на фразы выполняется в LLM-модуле: только там поток токенов
 упорядочен. Сборка фраз из отдельных событий `llm.chunk` была бы гонкой,
-поскольку обработчики событий выполняются параллельно.
+поскольку обработчики событий выполняются параллельно. Спецификация модуля —
+[llm.md](llm.md).
 
 ## 6. Метрики
 

@@ -465,3 +465,48 @@ async def test_all_silent_segments_yield_empty_transcript() -> None:
     )
     result = transcriber._transcribe_sync([0.0] * 16_000, 16_000)
     assert result.is_empty
+
+
+async def test_stt_retries_without_vad_when_onnxruntime_missing() -> None:
+    """Первая живая реплика не должна падать из-за отсутствующего VAD."""
+    from types import SimpleNamespace
+
+    transcriber = WhisperTranscriber(STTSettings(warmup=False, vad_filter=True))
+    transcriber._use_vad = True
+    calls: list[bool] = []
+
+    def fake_transcribe(_audio: object, **kwargs: object) -> tuple[list[object], SimpleNamespace]:
+        vad = bool(kwargs.get("vad_filter"))
+        calls.append(vad)
+        if vad:
+            raise RuntimeError("Applying the VAD filter requires the onnxruntime package")
+        return (
+            [SimpleNamespace(text="привет", no_speech_prob=0.1, avg_logprob=-0.2)],
+            SimpleNamespace(language="ru"),
+        )
+
+    transcriber._model = SimpleNamespace(transcribe=fake_transcribe)
+    result = transcriber._transcribe_sync([0.0] * 16_000, 16_000)
+
+    assert calls == [True, False]
+    assert transcriber._use_vad is False
+    assert result.text == "привет"
+
+
+async def test_stt_requests_whisper_translate_to_english() -> None:
+    """Whisper переводит речь хоста на английский (task=translate), а не транскрибирует на русском."""
+    from types import SimpleNamespace
+
+    captured: dict[str, object] = {}
+
+    transcriber = WhisperTranscriber(STTSettings(warmup=False, language="", task="translate"))
+
+    def fake_transcribe(_audio: object, **kwargs: object):
+        captured.update(kwargs)
+        return iter([]), SimpleNamespace(language="en")
+
+    transcriber._model = SimpleNamespace(transcribe=fake_transcribe)
+    transcriber._transcribe_sync([0.0] * 16_000, 16_000)
+
+    assert captured.get("task") == "translate"
+    assert captured.get("language") is None

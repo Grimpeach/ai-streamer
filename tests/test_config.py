@@ -39,6 +39,9 @@ def test_other_sections_have_flat_aliases(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("QDRANT_URL", "http://example:6333")
     monkeypatch.setenv("PTT_HOTKEY", "f8")
     monkeypatch.setenv("STT_MODEL", "tiny")
+    monkeypatch.setenv("STT_TASK", "translate")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "64")
+    monkeypatch.setenv("TTS_VOICE", "af_bella")
 
     settings = load_settings(_env_file=None)
 
@@ -46,6 +49,9 @@ def test_other_sections_have_flat_aliases(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.memory.qdrant_url == "http://example:6333"
     assert settings.ptt.hotkey == "f8"
     assert settings.stt.model == "tiny"
+    assert settings.stt.task == "translate"
+    assert settings.llm.max_tokens == 64
+    assert settings.tts.voice == "af_bella"
 
 
 @pytest.mark.parametrize(

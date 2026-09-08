@@ -117,7 +117,9 @@ class STTSettings(BaseModel):
     model: str = "large-v3-turbo"
     device: Literal["cuda", "cpu"] = "cuda"
     compute_type: str = "float16"
-    language: str = "ru"
+    language: str = ""
+    #: ``translate`` — Whisper всегда отдаёт английский, даже если хост говорит по-русски.
+    task: Literal["transcribe", "translate"] = "translate"
     #: beam_size=1 (greedy) — самый быстрый вариант; реплики хоста короткие,
     #: и выигрыш в точности от beam search не окупает лишних сотен миллисекунд.
     beam_size: int = 1
@@ -150,8 +152,14 @@ class LLMSettings(BaseModel):
     max_tokens: int = 220
     temperature: float = 0.8
     top_p: float = 0.9
-    #: Минимальная длина фразы, отдаваемой в TTS: короче — речь звучит рвано.
-    sentence_min_chars: int = 48
+    #: Имя персонажа подставляется в системный промпт ({name}).
+    character_name: str = "Eleanor de Châtillon"
+    #: Пустая строка — промпт по умолчанию из ``src.modules.llm.persona``.
+    system_prompt: str = ""
+    #: Сколько последних реплик user/assistant держать в горячем контексте.
+    history_turns: int = 20
+    #: Минимальная длина куска для TTS. 1 — отдавать на каждой логической паузе.
+    sentence_min_chars: int = 1
     #: Тайм-аут первого токена: превышение считается сбоем инференса.
     first_token_timeout_s: float = 5.0
     request_timeout_s: float = 60.0
@@ -160,14 +168,20 @@ class LLMSettings(BaseModel):
 
 
 class TTSSettings(BaseModel):
-    """Стриминговый синтез речи (CosyVoice / Kokoro)."""
+    """Стриминговый синтез речи (Kokoro / CosyVoice)."""
 
     engine: Literal["kokoro", "cosyvoice", "mock"] = "kokoro"
-    voice: str = "ru_female_1"
+    #: Идентификатор голоса Kokoro (``af_heart``). ``ru_female_1`` — алиас на него.
+    voice: str = "af_heart"
+    #: Код языка KPipeline (``a`` = American English). Пусто — из первой буквы голоса.
+    lang_code: str = ""
     sample_rate: int = 24_000
     speed: float = 1.0
     output_device: int | str | None = None
-    #: Kokoro укладывается в ~2.5 ГБ; для CosyVoice поднимите до 4.0.
+    device: Literal["auto", "cuda", "cpu"] = "auto"
+    #: Если CUDA/cuDNN не встаёт (конфликт с CTranslate2) — синтез на CPU, а не падение.
+    fallback_to_cpu: bool = True
+    #: Kokoro-82M укладывается примерно в 0.5 ГБ; запас под CosyVoice — 2.5.
     vram_gb: float = 2.5
 
 
@@ -185,6 +199,10 @@ class MemorySettings(BaseModel):
     embedding_model: str = "intfloat/multilingual-e5-base"
     embedding_dim: int = 768
     top_k: int = 5
+    #: Ниже этого косинусного сходства факт в промпт не попадает.
+    min_score: float = 0.25
+    #: Короткие реплики в Qdrant не кладём — это шум, а не лор.
+    min_remember_chars: int = 8
     vram_gb: float = 0.4
 
 
@@ -214,8 +232,13 @@ class FlatEnvAliasSource(PydanticBaseSettingsSource):
         "TWITCH_CLIENT_SECRET": ("twitch", "client_secret"),
         "PTT_HOTKEY": ("ptt", "hotkey"),
         "STT_MODEL": ("stt", "model"),
+        "STT_LANGUAGE": ("stt", "language"),
+        "STT_TASK": ("stt", "task"),
         "LLM_BASE_URL": ("llm", "base_url"),
         "LLM_MODEL": ("llm", "model"),
+        "LLM_MAX_TOKENS": ("llm", "max_tokens"),
+        "TTS_VOICE": ("tts", "voice"),
+        "TTS_ENGINE": ("tts", "engine"),
         "REDIS_URL": ("memory", "redis_url"),
         "QDRANT_URL": ("memory", "qdrant_url"),
     }
