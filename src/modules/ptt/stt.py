@@ -61,6 +61,8 @@ class WhisperTranscriber:
         #: Фактическое устройство после возможного fallback на CPU.
         self.device = settings.device
         self.compute_type = settings.compute_type
+        #: VAD (Silero ONNX) можно выключить на лету, если нет onnxruntime.
+        self._use_vad = settings.vad_filter
 
     @property
     def loaded(self) -> bool:
@@ -92,6 +94,7 @@ class WhisperTranscriber:
 
         if self.settings.warmup:
             await self._warmup()
+        self._configure_vad()
 
     async def unload(self) -> None:
         """Освобождает VRAM и останавливает рабочий поток."""
@@ -174,13 +177,30 @@ class WhisperTranscriber:
         tone = (0.08 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
         segments, _info = self._model.transcribe(
             tone,
-            language=self.settings.language,
+            language=self._whisper_language(),
+            task=self.settings.task,
             beam_size=1,
             vad_filter=False,
             condition_on_previous_text=False,
         )
         for _segment in segments:
             break
+
+    def _configure_vad(self) -> None:
+        """Silero VAD тянет ``onnxruntime``. Без пакета PTT всё равно должен слушать."""
+        if not self.settings.vad_filter:
+            self._use_vad = False
+            return
+        try:
+            import onnxruntime  # noqa: F401
+        except ImportError:
+            self._use_vad = False
+            logger.warning(
+                "Пакет onnxruntime не установлен — VAD выключен. "
+                "Речь распознаётся, но без отсечения тишины. Установите: pip install onnxruntime"
+            )
+            return
+        self._use_vad = True
 
     def _transcribe_sync(self, audio: Any, sample_rate: int) -> Transcript:
         """Синхронный инференс. Выполняется только в потоке STT."""
@@ -190,14 +210,14 @@ class WhisperTranscriber:
             logger.warning("STT ожидает 16 кГц, получено {} Гц", sample_rate)
 
         started = time.monotonic()
-        segments, info = self._model.transcribe(  # type: ignore[union-attr]
-            audio,
-            language=self.settings.language,
-            beam_size=self.settings.beam_size,
-            vad_filter=self.settings.vad_filter,
-            condition_on_previous_text=self.settings.condition_on_previous_text,
-            no_speech_threshold=self.settings.no_speech_threshold,
-        )
+        try:
+            segments, info = self._transcribe_model(audio, vad_filter=self._use_vad)
+        except RuntimeError as exc:
+            if not self._use_vad or "onnxruntime" not in str(exc).lower():
+                raise
+            logger.warning("VAD недоступен ({}). Повторяю расшифровку без фильтра тишины.", exc)
+            self._use_vad = False
+            segments, info = self._transcribe_model(audio, vad_filter=False)
 
         # segments — генератор: работа выполняется здесь, внутри рабочего потока.
         # Тихий хвост реплики (высокая no_speech_prob) не должен выкидывать
@@ -233,3 +253,20 @@ class WhisperTranscriber:
             avg_logprob=avg_logprob,
             no_speech_prob=no_speech,
         )
+
+    def _transcribe_model(self, audio: Any, *, vad_filter: bool) -> tuple[Any, Any]:
+        """Вызов faster-whisper. ``vad_filter`` вынесен, чтобы повторить без Silero."""
+        return self._model.transcribe(  # type: ignore[union-attr]
+            audio,
+            language=self._whisper_language(),
+            task=self.settings.task,
+            beam_size=self.settings.beam_size,
+            vad_filter=vad_filter,
+            condition_on_previous_text=self.settings.condition_on_previous_text,
+            no_speech_threshold=self.settings.no_speech_threshold,
+        )
+
+    def _whisper_language(self) -> str | None:
+        """Пустая настройка — автоопределение языка источника. ``translate`` всё равно даёт English."""
+        raw = (self.settings.language or "").strip()
+        return raw or None

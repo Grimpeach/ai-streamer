@@ -19,6 +19,12 @@ def test_cublas_error_is_recognized() -> None:
     assert is_missing_cuda_runtime(ValueError("bad audio shape")) is False
 
 
+def test_cudnn_symbol_error_is_recognized() -> None:
+    """CTranslate2 подсовывает старый cudnn64_9.dll — PyTorch LSTM падает так."""
+    error = OSError("Could not load symbol cudnnGetLibConfig. Error code 127")
+    assert is_missing_cuda_runtime(error) is True
+
+
 def test_discovered_dir_contains_cublas() -> None:
     """Регистрация бесполезна, если в каталоге нет самого DLL."""
     directories = cuda_dll_directories()

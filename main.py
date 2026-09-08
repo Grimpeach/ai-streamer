@@ -5,7 +5,8 @@
     python main.py --demo            # шина + моки: видно приоритеты и прерывание по PTT
     python main.py --twitch-only     # чтение живого чата Twitch с выводом в консоль
     python main.py --ptt-only        # живой PTT + STT без LLM/TTS (проверка прерывания)
-    python main.py                   # боевой режим (нужны Twitch-токены и модели)
+    python main.py --llm-only        # Twitch + PTT + LLM, куски TTS_REQUEST в консоль (без синтеза)
+    python main.py                   # полный стример: Twitch + PTT + STT + LLM + TTS + Memory
 
 Демо-режим не требует ни GPU, ни внешних сервисов: он поднимает шину событий,
 подсовывает синтетический чат, донаты и нажатия Push-to-Talk и показывает, что
@@ -30,7 +31,6 @@ from src.core.events import (
     AudioChunk,
     ChatMessage,
     Donation,
-    Event,
     EventType,
     HostSpeech,
     Raid,
@@ -40,6 +40,7 @@ from src.core.events import (
 from src.core.logger import get_logger, setup_logging
 from src.modules.base import Module
 from src.modules.llm.client import LLMModule, MockLLMModule
+from src.modules.memory.module import MemoryModule
 from src.modules.ptt.hotkey import MockPushToTalkModule, PushToTalkModule
 from src.modules.tts.streamer import MockTTSModule, TTSModule
 from src.modules.twitch.client import MockTwitchModule, TwitchChatModule
@@ -49,16 +50,17 @@ log = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class CliArgs:
-    """Аргументы запуска. Всегда содержит оба отладочных флага.
+    """Аргументы запуска. Всегда содержит отладочные флаги модулей.
 
-    ``argparse.Namespace`` легко собрать без ``twitch_only``/``ptt_only``,
-    если флаг забыли зарегистрировать. Этот тип задаёт значения по умолчанию,
-    поэтому ``amain`` не падает с AttributeError до старта модулей.
+    ``argparse.Namespace`` легко собрать без ``twitch_only``/``ptt_only``/
+    ``llm_only``, если флаг забыли зарегистрировать. Этот тип задаёт значения
+    по умолчанию, поэтому ``amain`` не падает с AttributeError до старта модулей.
     """
 
     demo: bool = False
     twitch_only: bool = False
     ptt_only: bool = False
+    llm_only: bool = False
     duration: float = 20.0
     log_level: str = "INFO"
 
@@ -69,63 +71,10 @@ class CliArgs:
             demo=bool(getattr(namespace, "demo", False)),
             twitch_only=bool(getattr(namespace, "twitch_only", False)),
             ptt_only=bool(getattr(namespace, "ptt_only", False)),
+            llm_only=bool(getattr(namespace, "llm_only", False)),
             duration=float(getattr(namespace, "duration", 20.0)),
             log_level=str(getattr(namespace, "log_level", "INFO")),
         )
-
-
-class DialogueRouter:
-    """Преобразует входящие триггеры в запрос к LLM.
-
-    Заглушка полноценного brain-модуля (Фаза 2): здесь пока нет ни памяти, ни
-    персоны — только сборка промпта и приоритеты, чтобы проверить конвейер.
-    """
-
-    def __init__(self, bus: EventBus) -> None:
-        self.bus = bus
-
-    def register(self) -> None:
-        """Подписывается на все источники реплик."""
-        self.bus.subscribe(
-            self._on_trigger,
-            (
-                EventType.HOST_SPEECH,
-                EventType.TWITCH_DONATION,
-                EventType.TWITCH_SUBSCRIPTION,
-                EventType.TWITCH_CHAT,
-            ),
-            name="brain.route",
-            preemptible=True,
-        )
-
-    async def _on_trigger(self, event: AnyEvent) -> None:
-        prompt = self._build_prompt(event)
-        if prompt is None:
-            return
-        await self.bus.publish(
-            Event(
-                type=EventType.LLM_REQUEST,
-                source="brain",
-                priority=event.priority,
-                correlation_id=event.correlation_id,
-                payload=TextRequest(text=prompt, trigger=str(event.type)),
-            )
-        )
-
-    def _build_prompt(self, event: AnyEvent) -> str | None:
-        payload = event.payload
-        if isinstance(payload, HostSpeech):
-            return f"Ведущий говорит тебе: «{payload.text}». Ответь коротко и по делу."
-        if isinstance(payload, Donation):
-            return (
-                f"{payload.author} задонатил {payload.amount:.0f} {payload.currency}: "
-                f"«{payload.message}». Поблагодари."
-            )
-        if isinstance(payload, TwitchSubscription):
-            return f"{payload.author} оформил подписку. Поблагодари зрителя."
-        if isinstance(payload, ChatMessage):
-            return f"Зритель {payload.author} в чате: «{payload.text}». Ответь одной-двумя фразами."
-        return None
 
 
 class ConsoleAudioSink:
@@ -158,10 +107,16 @@ def build_modules(bus: EventBus, settings: Settings) -> list[Module]:
             MockLLMModule(bus, settings.llm),
             MockTTSModule(bus, settings.tts),
         ]
+    memory = MemoryModule(
+        bus,
+        settings.memory,
+        session=settings.twitch.channel or "local",
+    )
     return [
         TwitchChatModule(bus, settings.twitch),
         PushToTalkModule(bus, settings.ptt, settings.stt),
-        LLMModule(bus, settings.llm),
+        memory,
+        LLMModule(bus, settings.llm, memory=memory),
         TTSModule(bus, settings.tts),
     ]
 
@@ -258,6 +213,102 @@ class HostEcho:
             log.info("[P{}] Хост: «{}»", int(event.priority), payload.text)
 
 
+class TtsRequestEcho:
+    """Печатает куски, которые LLM отдал бы в TTS — видно нарезку потока."""
+
+    def __init__(self, bus: EventBus) -> None:
+        self.bus = bus
+        self.clauses = 0
+        self.replies = 0
+        self._index = 0
+        self._correlation: str | None = None
+
+    def register(self) -> None:
+        """Лог не прерывается по PTT: иначе не видно, на каком куске оборвалось."""
+        self.bus.subscribe(self._on_clause, EventType.TTS_REQUEST, name="tts.echo", preemptible=False)
+        self.bus.subscribe(self._on_done, EventType.LLM_COMPLETED, name="llm.done", preemptible=False)
+        self.bus.subscribe(self._on_preempt, EventType.PTT_PRESSED, name="tts.echo.preempt", preemptible=False)
+
+    async def _on_clause(self, event: AnyEvent) -> None:
+        payload = event.payload
+        if not isinstance(payload, TextRequest):
+            return
+        if event.correlation_id != self._correlation:
+            self._correlation = event.correlation_id
+            self._index = 0
+        self._index += 1
+        self.clauses += 1
+        log.info("🔊 TTS_REQUEST [{}] «{}»", self._index, payload.text)
+
+    async def _on_done(self, _event: AnyEvent) -> None:
+        self.replies += 1
+        log.info("—— реплика завершена ({} фраз) ——", self._index)
+        self._index = 0
+        self._correlation = None
+
+    async def _on_preempt(self, _event: AnyEvent) -> None:
+        if self._index:
+            log.info("—— генерация прервана после {} фраз ——", self._index)
+        self._index = 0
+        self._correlation = None
+
+
+async def run_llm_only(bus: EventBus, settings: Settings, stop: asyncio.Event) -> int:
+    """Живые Twitch, PTT и LLM. Синтез не поднимается — фразы печатаются в консоль."""
+    chat = ChatEcho(bus)
+    chat.register()
+    host = HostEcho(bus)
+    host.register()
+    tts_echo = TtsRequestEcho(bus)
+    tts_echo.register()
+
+    modules: list[Module] = [
+        TwitchChatModule(bus, settings.twitch),
+        PushToTalkModule(bus, settings.ptt, settings.stt),
+        LLMModule(bus, settings.llm),
+    ]
+    started: list[Module] = []
+    exit_code = 0
+
+    try:
+        for module in modules:
+            try:
+                await module.start()
+                started.append(module)
+            except RuntimeError as exc:
+                log.error("{}", exc)
+                return 78 if isinstance(module, TwitchChatModule) else 1
+            except Exception as exc:
+                log.error("Модуль '{}' не поднялся: {}", module.name, exc)
+                return 1
+
+        twitch = next(m for m in started if isinstance(m, TwitchChatModule))
+        if await twitch.wait_until_ready(timeout_s=20):
+            log.info("Twitch подключён. Пишите в чат или говорите, удерживая '{}'.", settings.ptt.hotkey)
+        else:
+            log.warning("Twitch за 20с не подключился, супервизор продолжает попытки")
+        log.info(
+            "LLM: {} @ {} — ниже будут куски TTS_REQUEST по мере генерации.",
+            settings.llm.model,
+            settings.llm.base_url,
+        )
+        await stop.wait()
+    except KeyboardInterrupt:
+        log.info("Прерывание с клавиатуры")
+    finally:
+        for module in started:
+            with contextlib.suppress(Exception):
+                await module.stop()
+        log.info(
+            "Чат: {}, реплик хоста: {}, фраз TTS_REQUEST: {}, законченных ответов: {}",
+            chat.count,
+            host.utterances,
+            tts_echo.clauses,
+            tts_echo.replies,
+        )
+    return exit_code
+
+
 async def run_ptt_only(bus: EventBus, settings: Settings, stop: asyncio.Event) -> int:
     """Живой микрофон и Whisper. Ctrl+C для остановки."""
     echo = HostEcho(bus)
@@ -347,7 +398,13 @@ async def amain(args: CliArgs) -> int:
         finally:
             await bus.stop()
 
-    DialogueRouter(bus).register()
+    if args.llm_only:
+        await bus.start()
+        try:
+            return await run_llm_only(bus, settings, stop)
+        finally:
+            await bus.stop()
+
     sink = ConsoleAudioSink(bus)
     sink.register()
 
@@ -379,7 +436,7 @@ async def amain(args: CliArgs) -> int:
                 with contextlib.suppress(asyncio.CancelledError):
                     task.result()
         else:
-            log.info("Готов. Ctrl+C для остановки.")
+            log.info("Готов. Ctrl+C для остановки. Полный конвейер: Twitch + PTT + STT + LLM + TTS + Memory.")
             await stop.wait()
     except KeyboardInterrupt:
         log.info("Прерывание с клавиатуры")
@@ -437,6 +494,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="ptt_only",
         default=False,
         help="живой PTT + STT с выводом в консоль (без Twitch/LLM/TTS)",
+    )
+    debug.add_argument(
+        "--llm-only",
+        action="store_true",
+        dest="llm_only",
+        default=False,
+        help="живой Twitch + PTT + LLM; куски TTS_REQUEST в консоль (без синтеза речи)",
     )
     parser.add_argument("--duration", type=float, default=20.0, dest="duration", help="длительность демо, с")
     parser.add_argument("--log-level", default="INFO", dest="log_level", help="DEBUG/INFO/WARNING/ERROR")

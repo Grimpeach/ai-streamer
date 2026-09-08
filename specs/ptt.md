@@ -59,10 +59,17 @@ CTranslate2 на Windows ищет ``cublas64_12.dll`` в системных пу
 тишина отсекается VAD, энкодер не вызывается, и отсутствие cuBLAS всплывает
 только на первой живой реплике.
 
+Живая реплика включает Silero VAD и требует пакет ``onnxruntime``
+(``import onnxruntime``). Если его нет, STT выключает VAD и всё равно
+расшифровывает — PTT не должен падать. Установка: ``pip install onnxruntime``.
+
 Если CUDA-библиотеки всё равно не грузятся, STT переключается на CPU (int8),
 а не роняет PTT. Это запасной путь: целевая машина — RTX 4080 / CUDA 12.
 
 * `beam_size=1` — greedy: реплики короткие, beam search не окупает задержку.
+* `task=translate` — Whisper отдаёт **английский** текст, даже если хост говорит
+  по-русски (`STT__TASK=transcribe` вернёт язык источника).
+* `language` пустой — автоопределение языка речи; можно задать `STT__LANGUAGE=ru`.
 * `condition_on_previous_text=false` — иначе Whisper дописывает прошлую фразу.
 * сегменты с `no_speech_prob` выше порога отбрасываются по одному: тихий хвост
   не должен выкидывать уже сказанные слова.
@@ -77,6 +84,8 @@ CTranslate2 на Windows ищет ``cublas64_12.dll`` в системных пу
 |---|---|
 | `PTT__HOTKEY` / `PTT_HOTKEY` | глобальная клавиша, по умолчанию `f13` |
 | `STT__MODEL` / `STT_MODEL` | имя или путь модели faster-whisper |
+| `STT__TASK` / `STT_TASK` | `translate` (английский текст) или `transcribe` |
+| `STT__LANGUAGE` / `STT_LANGUAGE` | подсказка языка речи; пусто — авто |
 | `PTT__INPUT_DEVICE` | устройство sounddevice; пусто — системное |
 | `STT__DEVICE` | `cuda` или `cpu` |
 

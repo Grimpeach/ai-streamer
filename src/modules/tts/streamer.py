@@ -2,39 +2,57 @@
 
 Порядок речи критичен, поэтому фразы не обрабатываются параллельными
 обработчиками шины, а складываются во внутреннюю очередь с единственным
-worker-ом. Нажатие PTT сбрасывает очередь и снимает текущий синтез — так хост
-перебивает стримера без «догоняющего» хвоста фразы.
+worker-ом. Нажатие PTT сбрасывает очередь, снимает текущий синтез и рвёт
+аудиопоток — хост перебивает стримера без «догоняющего» хвоста фразы.
+
+Инференс Kokoro и PortAudio живут в рабочих потоках: event loop только
+координирует очередь и прерывание.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
+from typing import Any
+
+import numpy as np
 
 from src.core.config import TTSSettings
-from src.core.event_bus import EventBus, PreemptionToken
+from src.core.event_bus import EventBus, Preempted, PreemptionToken
 from src.core.events import AnyEvent, AudioChunk, Event, EventType, TextRequest
 from src.core.tasks import cancel_task, consume_exception, join_task
 from src.modules.base import Module
+from src.modules.tts.engine import KokoroEngine, float_to_pcm16
+from src.modules.tts.player import SoundPlayer
 
 __all__ = ["MockTTSModule", "TTSModule"]
 
 
 class TTSModule(Module):
-    """Синтезирует речь и стримит PCM-фрагменты на шину."""
+    """Синтезирует речь, играет её в звуковую карту и стримит PCM на шину."""
 
     name = "tts"
 
     #: Больше фраз в очереди озвучивать бессмысленно — стример отстанет от чата.
     max_pending_sentences = 8
 
-    def __init__(self, bus: EventBus, settings: TTSSettings) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        settings: TTSSettings,
+        *,
+        engine: Any | None = None,
+        player: Any | None = None,
+    ) -> None:
         super().__init__(bus)
         self.settings = settings
-        self._engine: object | None = None
+        self._engine = engine
+        self._player = player
         self._pending: asyncio.Queue[AnyEvent] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._current: asyncio.Task[None] | None = None
+        self._abort = threading.Event()
 
     async def start(self) -> None:
         """Загружает модель синтеза, поднимает worker и подписки."""
@@ -51,13 +69,33 @@ class TTSModule(Module):
         self.flush()
         await cancel_task(self._worker, log=self.log)
         self._worker = None
+        if self._player is not None:
+            self._player.stop()
+        engine = self._engine
         self._engine = None
+        unload = getattr(engine, "unload", None)
+        if unload is not None:
+            result = unload()
+            if asyncio.iscoroutine(result):
+                await result
         self._started = False
 
     async def load_engine(self) -> None:
-        """Загрузка модели TTS (Kokoro / CosyVoice)."""
-        # TODO(phase-2): загрузить модель на CUDA с учётом бюджета settings.vram_gb.
-        raise NotImplementedError("Движок TTS подключается в Фазе 2")
+        """Загрузка Kokoro на CUDA/CPU и открытие выходного устройства."""
+        if self.settings.engine == "mock":
+            self._engine = self._engine or "mock"
+            return
+        if self._engine is None:
+            engine = KokoroEngine(self.settings)
+            await engine.load()
+            self._engine = engine
+        elif hasattr(self._engine, "load") and not getattr(self._engine, "loaded", True):
+            await self._engine.load()
+        if self._player is None:
+            self._player = SoundPlayer(
+                sample_rate=self.settings.sample_rate,
+                device=self.settings.output_device,
+            )
 
     # ------------------------------------------------------------------ handlers
 
@@ -82,7 +120,10 @@ class TTSModule(Module):
         return self._pending.qsize()
 
     def flush(self) -> int:
-        """Снимает текущий синтез и очищает очередь. Возвращает число фраз."""
+        """Снимает текущий синтез/воспроизведение и очищает очередь."""
+        self._abort.set()
+        if self._player is not None:
+            self._player.stop()
         count = 0
         if self._current is not None and not self._current.done():
             self._current.cancel()
@@ -117,9 +158,10 @@ class TTSModule(Module):
             consume_exception(speak, log=self.log)
 
     async def _speak_one(self, event: AnyEvent) -> None:
-        """Синтезирует и публикует аудио одной фразы."""
+        """Синтезирует, играет и публикует аудио одной фразы."""
         request = event.payload
         assert isinstance(request, TextRequest)
+        self._abort.clear()
 
         await self.bus.publish(
             Event(
@@ -133,15 +175,25 @@ class TTSModule(Module):
         try:
             with self.bus.preemption_scope(f"tts:{event.id}") as token:
                 async for pcm in self.synthesize(request.text, token):
+                    token.raise_if_cancelled()
+                    if self._abort.is_set():
+                        break
                     await self.bus.publish(
                         Event(
                             type=EventType.TTS_CHUNK,
                             source=self.name,
                             correlation_id=event.correlation_id,
-                            payload=AudioChunk(pcm=pcm, sample_rate=self.settings.sample_rate, index=index),
+                            payload=AudioChunk(
+                                pcm=pcm,
+                                sample_rate=self.settings.sample_rate,
+                                index=index,
+                            ),
                         )
                     )
                     index += 1
+        except (asyncio.CancelledError, Preempted):
+            self.log.debug("Озвучка прервана: {}", event.describe())
+            raise
         finally:
             await self.bus.publish(
                 Event(
@@ -152,9 +204,21 @@ class TTSModule(Module):
             )
 
     async def synthesize(self, text: str, token: PreemptionToken) -> AsyncIterator[bytes]:
-        """Синтез фразы в поток PCM-фрагментов."""
-        raise NotImplementedError("Движок TTS подключается в Фазе 2")
-        yield b""  # pragma: no cover — делает функцию async-генератором
+        """Синтез фразы: чанки PCM 16-bit + воспроизведение каждого чанка."""
+        engine = self._engine
+        if engine is None or not hasattr(engine, "stream"):
+            raise RuntimeError("Движок TTS не загружен")
+
+        async for samples in engine.stream(text, self._abort):
+            token.raise_if_cancelled()
+            if self._abort.is_set():
+                return
+            audio = np.asarray(samples, dtype=np.float32)
+            if self._player is not None:
+                await asyncio.to_thread(self._player.play, audio, self._abort)
+                if self._abort.is_set():
+                    return
+            yield float_to_pcm16(audio)
 
 
 class MockTTSModule(TTSModule):
@@ -167,8 +231,9 @@ class MockTTSModule(TTSModule):
         self.chunk_duration_s = chunk_duration_s
 
     async def load_engine(self) -> None:
-        """Модель не нужна."""
+        """Модель и звуковая карта не нужны."""
         self._engine = "mock"
+        self._player = None
 
     async def synthesize(self, text: str, token: PreemptionToken) -> AsyncIterator[bytes]:
         """Отдаёт тишину порциями, как будто произносит текст в реальном времени."""
@@ -176,5 +241,7 @@ class MockTTSModule(TTSModule):
         chunks = max(1, round(len(text) / 12))
         for _ in range(chunks):
             token.raise_if_cancelled()
+            if self._abort.is_set():
+                return
             await asyncio.sleep(self.chunk_duration_s)
             yield b"\x00\x00" * samples_per_chunk
