@@ -1,8 +1,8 @@
 # Спецификация: LLM (Фаза 4)
 
 Реализация: `src/modules/llm/client.py`, история — `context.py`,
-персона — `persona.py`. Настройки — `LLMSettings` (`LLM__BASE_URL`,
-`LLM__MODEL`, `LLM__MAX_TOKENS`).
+подстановка `{name}` — `persona.py`. Настройки — `LLMSettings`
+(`LLM__BASE_URL`, `LLM__MODEL`, `LLM__CHARACTER_NAME`, `LLM__SYSTEM_PROMPT`).
 
 ## 1. Клиент
 
@@ -16,6 +16,8 @@
 | `model` | `LLM__MODEL` |
 | `max_tokens` | `LLM__MAX_TOKENS` (плоский алиас той же настройки) |
 | `api_key` | `LLM__API_KEY` (для локального сервера достаточно заглушки) |
+| `character_name` | `LLM__CHARACTER_NAME` |
+| `system_prompt` | `LLM__SYSTEM_PROMPT` (многострочный, в двойных кавычках) |
 
 ## 2. Входящие события
 
@@ -31,8 +33,12 @@
 ## 3. Контекст и персона
 
 `DialogueContext` — скользящее окно реплик в памяти процесса (не Redis).
-Системный промпт описывает персонажа как Eleanor de Châtillon: крестоносица
-из Иерусалима, стримерша Twitch. Говорит вслух, коротко, **по-английски**.
+Имя и системный промпт **не хранятся в коде**: их читают из `.env`
+(`LLM__CHARACTER_NAME`, `LLM__SYSTEM_PROMPT`; плоские алиасы
+`LLM_CHARACTER_NAME` / `LLM_SYSTEM_PROMPT`). В шаблоне `{name}` заменяется
+на имя. Файл `.env` в git не попадает; в `.env.example` только пустые ключи.
+К каждой реплике хоста/чата дописывается `Respond in English.`: Qwen иначе
+зеркалит язык входящего текста, даже при английском системном промпте.
 
 - Реплика пользователя кладётся в историю **до** генерации.
 - Ответ ассистента — **только после** успешного завершения стрима.

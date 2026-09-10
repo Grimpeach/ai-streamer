@@ -114,7 +114,7 @@ class PTTSettings(BaseModel):
 class STTSettings(BaseModel):
     """Faster-Whisper для расшифровки реплик хоста (~1 ГБ VRAM)."""
 
-    model: str = "large-v3-turbo"
+    model: str = "large-v3"
     device: Literal["cuda", "cpu"] = "cuda"
     compute_type: str = "float16"
     language: str = ""
@@ -152,9 +152,9 @@ class LLMSettings(BaseModel):
     max_tokens: int = 220
     temperature: float = 0.8
     top_p: float = 0.9
-    #: Имя персонажа подставляется в системный промпт ({name}).
-    character_name: str = "Eleanor de Châtillon"
-    #: Пустая строка — промпт по умолчанию из ``src.modules.llm.persona``.
+    #: Имя персонажа из ``LLM__CHARACTER_NAME``; подставляется в ``{name}`` промпта.
+    character_name: str = ""
+    #: Системный промпт из ``LLM__SYSTEM_PROMPT``. Живая персона живёт в ``.env``, не в коде.
     system_prompt: str = ""
     #: Сколько последних реплик user/assistant держать в горячем контексте.
     history_turns: int = 20
@@ -237,6 +237,8 @@ class FlatEnvAliasSource(PydanticBaseSettingsSource):
         "LLM_BASE_URL": ("llm", "base_url"),
         "LLM_MODEL": ("llm", "model"),
         "LLM_MAX_TOKENS": ("llm", "max_tokens"),
+        "LLM_CHARACTER_NAME": ("llm", "character_name"),
+        "LLM_SYSTEM_PROMPT": ("llm", "system_prompt"),
         "TTS_VOICE": ("tts", "voice"),
         "TTS_ENGINE": ("tts", "engine"),
         "REDIS_URL": ("memory", "redis_url"),

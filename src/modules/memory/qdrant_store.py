@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.core.config import MemorySettings
+from src.core.hf_hub import ensure_windows_hf_cache
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +65,7 @@ class LongTermMemory:
     def _load_embedder(self) -> Any:
         """Лениво загружает модель эмбеддингов на CUDA, с запасным вариантом на CPU."""
         if self._embedder is None:
+            ensure_windows_hf_cache()
             from sentence_transformers import SentenceTransformer
 
             device = "cpu"

@@ -53,6 +53,7 @@ class TTSModule(Module):
         self._worker: asyncio.Task[None] | None = None
         self._current: asyncio.Task[None] | None = None
         self._abort = threading.Event()
+        self._epoch = 0
 
     async def start(self) -> None:
         """Загружает модель синтеза, поднимает worker и подписки."""
@@ -69,8 +70,14 @@ class TTSModule(Module):
         self.flush()
         await cancel_task(self._worker, log=self.log)
         self._worker = None
-        if self._player is not None:
-            self._player.stop()
+        player = self._player
+        self._player = None
+        if player is not None:
+            closer = getattr(player, "close", None)
+            if closer is not None:
+                await asyncio.to_thread(closer)
+            else:
+                player.stop()
         engine = self._engine
         self._engine = None
         unload = getattr(engine, "unload", None)
@@ -96,6 +103,9 @@ class TTSModule(Module):
                 sample_rate=self.settings.sample_rate,
                 device=self.settings.output_device,
             )
+        starter = getattr(self._player, "start", None)
+        if starter is not None:
+            await asyncio.to_thread(starter)
 
     # ------------------------------------------------------------------ handlers
 
@@ -121,6 +131,7 @@ class TTSModule(Module):
 
     def flush(self) -> int:
         """Снимает текущий синтез/воспроизведение и очищает очередь."""
+        self._epoch += 1
         self._abort.set()
         if self._player is not None:
             self._player.stop()
@@ -139,11 +150,15 @@ class TTSModule(Module):
         """Последовательно озвучивает фразы из очереди."""
         while True:
             event = await self._pending.get()
+            epoch = self._epoch
+            self._abort.clear()
+            if epoch != self._epoch:
+                continue
             if event.is_stale:
                 self.log.debug("Фраза просрочена, не озвучиваю: {}", event.describe())
                 continue
 
-            speak = asyncio.create_task(self._speak_one(event), name=f"tts-speak:{event.id}")
+            speak = asyncio.create_task(self._speak_one(event, epoch), name=f"tts-speak:{event.id}")
             self._current = speak
             try:
                 # join_task не поднимает отмену вложенной задачи: прерывание
@@ -157,11 +172,12 @@ class TTSModule(Module):
                 self._current = None
             consume_exception(speak, log=self.log)
 
-    async def _speak_one(self, event: AnyEvent) -> None:
+    async def _speak_one(self, event: AnyEvent, epoch: int) -> None:
         """Синтезирует, играет и публикует аудио одной фразы."""
         request = event.payload
         assert isinstance(request, TextRequest)
-        self._abort.clear()
+        if epoch != self._epoch or self._abort.is_set():
+            return
 
         await self.bus.publish(
             Event(
@@ -192,6 +208,7 @@ class TTSModule(Module):
                     )
                     index += 1
         except (asyncio.CancelledError, Preempted):
+            self._abort.set()
             self.log.debug("Озвучка прервана: {}", event.describe())
             raise
         finally:

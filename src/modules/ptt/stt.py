@@ -21,6 +21,7 @@ from typing import Any
 
 from src.core.config import STTSettings
 from src.core.cuda import ensure_windows_cuda_dlls, is_missing_cuda_runtime
+from src.core.hf_hub import ensure_windows_hf_cache
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,6 +62,8 @@ class WhisperTranscriber:
         #: Фактическое устройство после возможного fallback на CPU.
         self.device = settings.device
         self.compute_type = settings.compute_type
+        #: turbo не обучен переводу — при task=translate берём large-v3.
+        self.model_name = _model_for_task(settings)
         #: VAD (Silero ONNX) можно выключить на лету, если нет onnxruntime.
         self._use_vad = settings.vad_filter
 
@@ -77,10 +80,11 @@ class WhisperTranscriber:
             return
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
         logger.info(
-            "Загружаю STT '{}' на {} ({})",
-            self.settings.model,
+            "Загружаю STT '{}' на {} ({}, task={})",
+            self.model_name,
             self.settings.device,
             self.settings.compute_type,
+            self.settings.task,
         )
         started = time.monotonic()
         await self._run(self._load_sync)
@@ -157,10 +161,11 @@ class WhisperTranscriber:
             self.compute_type = "int8"
 
     def _create_model(self, device: str, compute_type: str) -> Any:
+        ensure_windows_hf_cache()
         from faster_whisper import WhisperModel
 
         return WhisperModel(
-            self.settings.model,
+            self.model_name,
             device=device,
             compute_type=compute_type,
             download_root=str(self.settings.download_root) if self.settings.download_root else None,
@@ -244,10 +249,18 @@ class WhisperTranscriber:
         text = " ".join(parts)
         avg_logprob = sum(logprobs) / len(logprobs) if logprobs else 0.0
         no_speech = min(speech_probs) if speech_probs else 1.0
+        detected = getattr(info, "language", "") or self.settings.language
+
+        logger.debug(
+            "STT task={} source_lang={} text={!r}",
+            self.settings.task,
+            detected,
+            text,
+        )
 
         return Transcript(
             text=text,
-            language=getattr(info, "language", "") or self.settings.language,
+            language=detected,
             audio_s=len(audio) / sample_rate,
             latency_s=time.monotonic() - started,
             avg_logprob=avg_logprob,
@@ -270,3 +283,16 @@ class WhisperTranscriber:
         """Пустая настройка — автоопределение языка источника. ``translate`` всё равно даёт English."""
         raw = (self.settings.language or "").strip()
         return raw or None
+
+
+def _model_for_task(settings: STTSettings) -> str:
+    """turbo не обучен на translate — иначе речь хоста остаётся на языке источника."""
+    name = (settings.model or "").strip() or "large-v3"
+    if settings.task == "translate" and "turbo" in name.lower():
+        logger.warning(
+            "Модель '{}' не умеет task=translate (turbo без данных перевода). "
+            "Загружаю 'large-v3', чтобы STT отдавал английский.",
+            name,
+        )
+        return "large-v3"
+    return name

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -41,6 +43,8 @@ def test_other_sections_have_flat_aliases(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("STT_MODEL", "tiny")
     monkeypatch.setenv("STT_TASK", "translate")
     monkeypatch.setenv("LLM_MAX_TOKENS", "64")
+    monkeypatch.setenv("LLM_CHARACTER_NAME", "Ada")
+    monkeypatch.setenv("LLM_SYSTEM_PROMPT", "You are {name}.")
     monkeypatch.setenv("TTS_VOICE", "af_bella")
 
     settings = load_settings(_env_file=None)
@@ -51,6 +55,8 @@ def test_other_sections_have_flat_aliases(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.stt.model == "tiny"
     assert settings.stt.task == "translate"
     assert settings.llm.max_tokens == 64
+    assert settings.llm.character_name == "Ada"
+    assert settings.llm.system_prompt == "You are {name}."
     assert settings.tts.voice == "af_bella"
 
 
@@ -88,3 +94,17 @@ def test_vram_breakdown_sums_to_requested() -> None:
 
     assert sum(settings.vram_breakdown_gb.values()) == pytest.approx(settings.vram_requested_gb)
     assert settings.vram_requested_gb <= settings.vram.total_budget_gb
+
+
+def test_llm_persona_multiline_prompt_from_env_file(tmp_path: Path) -> None:
+    """Многострочный LLM__SYSTEM_PROMPT из файла .env доходит до настроек целиком."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'LLM__CHARACTER_NAME=Ada\n'
+        'LLM__SYSTEM_PROMPT="You are {name}.\nSpeak English."\n',
+        encoding="utf-8",
+    )
+    settings = Settings(_env_file=env_file)
+
+    assert settings.llm.character_name == "Ada"
+    assert settings.llm.system_prompt == "You are {name}.\nSpeak English."

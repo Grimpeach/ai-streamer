@@ -71,7 +71,10 @@ class LLMModule(Module):
             self._client = self._make_client()
         self._subscribe()
         self._started = True
-        self.log.info("LLM-клиент готов: {} @ {}", self.settings.model, self.settings.base_url)
+        persona = self.settings.character_name.strip() or "(без имени)"
+        if not self.settings.system_prompt.strip():
+            self.log.warning("LLM__SYSTEM_PROMPT пуст — задайте персону в .env")
+        self.log.info("LLM-клиент готов: {} @ {} (persona={})", self.settings.model, self.settings.base_url, persona)
 
     def _make_client(self) -> Any:
         from openai import AsyncOpenAI
@@ -285,10 +288,7 @@ class MockLLMModule(LLMModule):
 
 
 def _system_prompt(settings: LLMSettings) -> str:
-    custom = settings.system_prompt.strip()
-    if custom:
-        return render_system_prompt(settings.character_name, custom)
-    return render_system_prompt(settings.character_name)
+    return render_system_prompt(settings.character_name, settings.system_prompt)
 
 
 def _with_memory(messages: list[dict[str, str]], block: str) -> list[dict[str, str]]:
@@ -306,23 +306,27 @@ def _user_prompt(event: AnyEvent) -> tuple[str, str, bool] | None:
     payload = event.payload
     if isinstance(payload, HostSpeech):
         text = payload.text.strip()
-        return (f"Host says: {text}", str(event.type), False) if text else None
+        return (_with_english_reply(f"Host says: {text}"), str(event.type), False) if text else None
     if isinstance(payload, ChatMessage):
         text = payload.text.strip()
         if not text:
             return None
-        return (f"Viewer {payload.author} in chat: {text}", str(event.type), False)
+        return (_with_english_reply(f"Viewer {payload.author} in chat: {text}"), str(event.type), False)
     if isinstance(payload, Donation):
         line = f"{payload.author} donated {payload.amount:.0f} {payload.currency}"
         message = payload.message.strip()
         if message:
             line += f": {message}"
-        return (f"{line}. Thank them with royal grace, briefly.", str(event.type), False)
+        return (_with_english_reply(f"{line}. Thank them with royal grace, briefly."), str(event.type), False)
     if isinstance(payload, TwitchSubscription):
-        return (f"{payload.author} subscribed. Acknowledge their generosity.", str(event.type), False)
+        return (
+            _with_english_reply(f"{payload.author} subscribed. Acknowledge their generosity."),
+            str(event.type),
+            False,
+        )
     if isinstance(payload, Raid):
         return (
-            f"{payload.author} raided with {payload.viewers} viewers. Greet them.",
+            _with_english_reply(f"{payload.author} raided with {payload.viewers} viewers. Greet them."),
             str(event.type),
             False,
         )
@@ -330,6 +334,11 @@ def _user_prompt(event: AnyEvent) -> tuple[str, str, bool] | None:
         text = payload.text.strip()
         return (text, payload.trigger, payload.critical) if text else None
     return None
+
+
+def _with_english_reply(line: str) -> str:
+    """Qwen зеркалит язык реплики; явная метка держит ответ на английском."""
+    return f"{line}\nRespond in English."
 
 
 def _choice_delta(chunk: object) -> str | None:

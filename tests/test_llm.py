@@ -11,7 +11,7 @@ from src.core.events import ChatMessage, Event, EventType, HostSpeech, TextReque
 from src.core.text import SentenceBuffer
 from src.modules.llm.client import LLMModule
 from src.modules.llm.context import DialogueContext
-from src.modules.llm.persona import DEFAULT_CHARACTER_NAME, render_system_prompt
+from src.modules.llm.persona import render_system_prompt
 
 
 class _FakeStream:
@@ -112,12 +112,11 @@ def test_sentence_buffer_respects_min_chars() -> None:
     assert buffer.push("смотрите.") == ["Так, смотрите."]
 
 
-def test_system_prompt_describes_english_crusader_streamer() -> None:
-    """Системный промпт задаёт персонажа как англоязычную крестоносцу-стримершу."""
-    prompt = render_system_prompt()
-    assert DEFAULT_CHARACTER_NAME in prompt
-    assert "English" in prompt
-    assert "crusader" in prompt.lower()
+def test_system_prompt_substitutes_character_name() -> None:
+    """Имя из настроек подставляется в шаблон; в коде персоны нет."""
+    prompt = render_system_prompt("Ada", "You are {name}. Speak English.")
+    assert prompt == "You are Ada. Speak English."
+    assert render_system_prompt("Ada", "") == "You are Ada."
 
 
 def test_dialogue_context_keeps_system_first() -> None:
@@ -256,4 +255,5 @@ async def test_host_speech_has_priority_over_chat_in_prompt() -> None:
     user = module.context.messages()[1]["content"]
     assert user.startswith("Host says:")
     assert "проверь железо" in user
+    assert "Respond in English." in user
     assert module.context.last_assistant() == "Слушаю."

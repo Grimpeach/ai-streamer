@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,7 @@ import numpy as np
 
 from src.core.config import TTSSettings
 from src.core.cuda import ensure_windows_cuda_dlls, is_missing_cuda_runtime
+from src.core.hf_hub import ensure_windows_hf_cache
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -83,6 +85,7 @@ class KokoroEngine:
         """Грузит веса Kokoro в рабочем потоке и прогревает синтез."""
         if self._pipeline is not None:
             return
+        ensure_windows_hf_cache()
         ensure_windows_cuda_dlls()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-kokoro")
         logger.info("Загружаю Kokoro (голос '{}', lang={})", self.voice, self.lang_code)
@@ -123,8 +126,10 @@ class KokoroEngine:
         queue: asyncio.Queue[np.ndarray | Exception | None] = asyncio.Queue()
 
         def produce() -> None:
+            iterator: Any = None
             try:
-                for result in self._pipeline(cleaned, voice=self.voice, speed=self.settings.speed):
+                iterator = iter(self._pipeline(cleaned, voice=self.voice, speed=self.settings.speed))
+                for result in iterator:
                     if _is_set(abort):
                         break
                     audio = tensor_to_float32(_result_audio(result))
@@ -133,21 +138,38 @@ class KokoroEngine:
             except Exception as exc:
                 loop.call_soon_threadsafe(queue.put_nowait, exc)
                 return
+            finally:
+                # break из for не закрывает генератор — GPU/CPU остаются занятыми.
+                if iterator is not None:
+                    with contextlib.suppress(Exception):
+                        iterator.close()
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
         future = self._executor.submit(produce)
         try:
             while True:
                 if _is_set(abort):
-                    return
-                item = await queue.get()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.05)
+                except TimeoutError:
+                    continue
                 if item is None:
                     return
                 if isinstance(item, Exception):
                     raise item
                 yield item
         finally:
-            future.cancel()
+            # future.cancel() не останавливает уже идущий инференс. Ждём producer,
+            # иначе следующий STT на той же GPU зависает на десяток секунд.
+            # shield: отмена _speak_one не должна бросить ожидание GPU.
+            if not future.done():
+                waiter = asyncio.wrap_future(future)
+                try:
+                    await asyncio.shield(waiter)
+                except asyncio.CancelledError:
+                    await waiter
+                    raise
 
     def _load_sync(self) -> None:
         device = self._pick_device()
@@ -170,6 +192,7 @@ class KokoroEngine:
             self.device = "cpu"
 
     def _create_pipeline(self, device: str) -> Any:
+        ensure_windows_hf_cache()
         from kokoro import KPipeline
 
         if device == "cuda":

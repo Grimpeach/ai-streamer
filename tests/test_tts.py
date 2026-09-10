@@ -172,3 +172,64 @@ async def test_playback_does_not_block_event_loop() -> None:
             await tts.stop()
 
     assert ticks >= 6
+
+
+def test_player_stop_does_not_abort_or_close_stream() -> None:
+    """PTT глушит буфер, но не вызывает abort/close — иначе микрофон зависает на Windows."""
+    from src.modules.tts.player import SoundPlayer
+
+    class _Stream:
+        abort_calls = 0
+        stop_calls = 0
+        close_calls = 0
+        active = True
+
+        def abort(self) -> None:
+            self.abort_calls += 1
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    player = SoundPlayer()
+    stream = _Stream()
+    player._stream = stream
+    player.stop()
+    assert stream.abort_calls == 0
+    assert stream.close_calls == 0
+    player.close()
+    assert stream.close_calls == 1
+
+
+async def test_kokoro_waits_for_producer_and_closes_generator_on_abort() -> None:
+    """По PTT генератор Kokoro закрывается, поток инференса не остаётся висеть на GPU."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    closed = threading.Event()
+    abort = threading.Event()
+
+    def pipeline(*_args: object, **_kwargs: object):
+        try:
+            yield SimpleNamespace(audio=np.ones(8, dtype=np.float32))
+            while not abort.is_set():
+                time.sleep(0.01)
+            yield SimpleNamespace(audio=np.ones(8, dtype=np.float32))
+        finally:
+            closed.set()
+
+    engine = KokoroEngine(TTSSettings())
+    engine._pipeline = pipeline
+    engine._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-test")
+    chunks = 0
+    try:
+        async for _audio in engine.stream("hello", abort):
+            chunks += 1
+            abort.set()
+        assert chunks == 1
+        assert closed.wait(timeout=2)
+    finally:
+        engine._executor.shutdown(wait=True)

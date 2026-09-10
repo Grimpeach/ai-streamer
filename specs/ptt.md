@@ -55,7 +55,10 @@ PTT **мгновенно** отменяет текущую генерацию LL
 CTranslate2 на Windows ищет ``cublas64_12.dll`` в системных путях, а не в
 ``torch/lib``, где этот файл уже лежит вместе с PyTorch. Перед загрузкой
 модели `ensure_windows_cuda_dlls()` регистрирует эти каталоги через
-``os.add_dll_directory``. Прогрев гоняет короткий тон с ``vad_filter=False``:
+``os.add_dll_directory``. На Windows Hugging Face Hub без Developer Mode
+падает с WinError 1314 на symlink'ах в кэше; `ensure_windows_hf_cache()`
+ставит ``HF_HUB_DISABLE_SYMLINKS=1``, и веса копируются, а не линкуются.
+Прогрев гоняет короткий тон с ``vad_filter=False``:
 тишина отсекается VAD, энкодер не вызывается, и отсутствие cuBLAS всплывает
 только на первой живой реплике.
 
@@ -69,6 +72,8 @@ CTranslate2 на Windows ищет ``cublas64_12.dll`` в системных пу
 * `beam_size=1` — greedy: реплики короткие, beam search не окупает задержку.
 * `task=translate` — Whisper отдаёт **английский** текст, даже если хост говорит
   по-русски (`STT__TASK=transcribe` вернёт язык источника).
+* `large-v3-turbo` **не умеет** translate (модель не обучена на переводе и тихо
+  транскрибирует язык источника). При `task=translate` загружается `large-v3`.
 * `language` пустой — автоопределение языка речи; можно задать `STT__LANGUAGE=ru`.
 * `condition_on_previous_text=false` — иначе Whisper дописывает прошлую фразу.
 * сегменты с `no_speech_prob` выше порога отбрасываются по одному: тихий хвост

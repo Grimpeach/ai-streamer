@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from src.core.config import Settings, load_settings
 from src.core.cuda import ensure_windows_cuda_dlls
+from src.core.hf_hub import ensure_windows_hf_cache
 from src.core.event_bus import EventBus
 from src.core.events import (
     AnyEvent,
@@ -366,6 +367,7 @@ async def amain(args: CliArgs) -> int:
         return 78  # EX_CONFIG
 
     setup_logging(settings.log_level, log_file=settings.log_file)
+    ensure_windows_hf_cache()
     ensure_windows_cuda_dlls()
 
     log.info("{} v0 запускается (demo={})", settings.app_name, settings.demo_mode)

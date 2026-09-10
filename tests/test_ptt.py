@@ -510,3 +510,15 @@ async def test_stt_requests_whisper_translate_to_english() -> None:
 
     assert captured.get("task") == "translate"
     assert captured.get("language") is None
+
+
+async def test_translate_task_replaces_turbo_model() -> None:
+    """large-v3-turbo игнорирует translate — подменяем на large-v3, иначе STT остаётся на русском."""
+    translating = WhisperTranscriber(
+        STTSettings(warmup=False, model="large-v3-turbo", task="translate")
+    )
+    transcribing = WhisperTranscriber(
+        STTSettings(warmup=False, model="large-v3-turbo", task="transcribe")
+    )
+    assert translating.model_name == "large-v3"
+    assert transcribing.model_name == "large-v3-turbo"

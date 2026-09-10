@@ -90,10 +90,11 @@ class PushToTalkModule(Module):
             raise
         self._started = True
         self.log.info(
-            "PTT активен: клавиша '{}' прерывает генерацию мгновенно, STT '{}' на {}",
+            "PTT активен: клавиша '{}' прерывает генерацию мгновенно, STT '{}' на {} (task={})",
             self.settings.hotkey,
-            self.stt_settings.model,
+            self._transcriber.model_name,
             self._transcriber.device,
+            self.stt_settings.task,
         )
 
     async def stop(self) -> None:
@@ -248,11 +249,12 @@ class PushToTalkModule(Module):
         """Публикует ``HOST_SPEECH`` — Priority 1, выше донатов и чата."""
         self.utterances_published += 1
         self.log.info(
-            "Хост: «{}» (аудио {:.1f}с, STT {:.0f}мс, от нажатия {:.0f}мс)",
+            "Хост: «{}» (аудио {:.1f}с, STT {:.0f}мс, от нажатия {:.0f}мс, lang={})",
             transcript.text,
             recording.duration_s,
             transcript.latency_s * 1000,
             (time.monotonic() - self._pressed_at) * 1000,
+            transcript.language or "?",
         )
         await self.bus.publish(
             Event(
