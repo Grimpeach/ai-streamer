@@ -167,6 +167,27 @@ class LLMSettings(BaseModel):
     vram_gb: float = 8.5
 
 
+class RVCSettings(BaseModel):
+    """Опциональный RVC: конверсия голоса Kokoro в персонажа."""
+
+    enabled: bool = False
+    model_path: Path = PROJECT_ROOT / "models" / "rvc" / "egirl.pth"
+    index_path: Path = PROJECT_ROOT / "models" / "rvc" / "egirl.index"
+    #: Смещение тона в полутонах (``f0up_key``).
+    pitch: int = 0
+    device: str = "cuda:0"
+    f0_method: Literal["pm", "rmvpe"] = "rmvpe"
+
+    @field_validator("model_path", "index_path", mode="before")
+    @classmethod
+    def _resolve_path(cls, value: object) -> object:
+        """Относительные пути считаются от корня репозитория."""
+        if value is None or value == "":
+            return value
+        path = Path(value)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 class TTSSettings(BaseModel):
     """Стриминговый синтез речи (Kokoro / CosyVoice)."""
 
@@ -177,12 +198,29 @@ class TTSSettings(BaseModel):
     lang_code: str = ""
     sample_rate: int = 24_000
     speed: float = 1.0
+    #: Индекс или имя устройства PortAudio. ``None`` — вывод по умолчанию ОС.
     output_device: int | str | None = None
     device: Literal["auto", "cuda", "cpu"] = "auto"
+
+    @field_validator("output_device", mode="before")
+    @classmethod
+    def _empty_output_device_is_none(cls, value: object) -> object:
+        """Пустая ``TTS__OUTPUT_DEVICE`` = системное устройство; цифры → индекс."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped == "":
+                return None
+            if stripped.lstrip("-").isdigit():
+                return int(stripped)
+            return stripped
+        return value
     #: Если CUDA/cuDNN не встаёт (конфликт с CTranslate2) — синтез на CPU, а не падение.
     fallback_to_cpu: bool = True
-    #: Kokoro-82M укладывается примерно в 0.5 ГБ; запас под CosyVoice — 2.5.
+    #: Kokoro-82M укладывается примерно в 0.5 ГБ; запас под CosyVoice / RVC — 2.5.
     vram_gb: float = 2.5
+    rvc: RVCSettings = Field(default_factory=RVCSettings)
 
 
 class MemorySettings(BaseModel):
@@ -241,6 +279,7 @@ class FlatEnvAliasSource(PydanticBaseSettingsSource):
         "LLM_SYSTEM_PROMPT": ("llm", "system_prompt"),
         "TTS_VOICE": ("tts", "voice"),
         "TTS_ENGINE": ("tts", "engine"),
+        "TTS_OUTPUT_DEVICE": ("tts", "output_device"),
         "REDIS_URL": ("memory", "redis_url"),
         "QDRANT_URL": ("memory", "qdrant_url"),
     }

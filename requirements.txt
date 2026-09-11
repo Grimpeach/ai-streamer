@@ -62,6 +62,7 @@ tokenizers>=0.20
 kokoro>=0.9.4
 misaki>=0.9.4
 phonemizer>=3.3
+rvc-python>=0.1.5
 
 # --- Twitch: чтение чата (IRC) ------------------------------------------------
 # Версия 3.x — другой API (EventSub вместо IRC), несовместима с src/modules/twitch.

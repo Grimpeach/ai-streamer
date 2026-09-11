@@ -88,6 +88,38 @@ def test_vram_budget_is_enforced() -> None:
         Settings(_env_file=None, llm={"vram_gb": 14.0})  # type: ignore[arg-type]
 
 
+def test_tts_output_device_comes_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TTS__OUTPUT_DEVICE попадает в SoundPlayer: индекс, имя или пусто."""
+    monkeypatch.setenv("TTS__OUTPUT_DEVICE", "7")
+    settings = load_settings(_env_file=None)
+    assert settings.tts.output_device == 7
+
+    monkeypatch.setenv("TTS__OUTPUT_DEVICE", "CABLE Input")
+    settings = load_settings(_env_file=None)
+    assert settings.tts.output_device == "CABLE Input"
+
+    monkeypatch.setenv("TTS__OUTPUT_DEVICE", "")
+    settings = load_settings(_env_file=None)
+    assert settings.tts.output_device is None
+
+
+def test_rvc_settings_come_from_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TTS__RVC__* читается вложенной секцией, пути резолвятся от корня репо."""
+    monkeypatch.setenv("TTS__RVC__ENABLED", "true")
+    monkeypatch.setenv("TTS__RVC__PITCH", "2")
+    monkeypatch.setenv("TTS__RVC__DEVICE", "cuda:0")
+    monkeypatch.setenv("TTS__RVC__F0_METHOD", "pm")
+    monkeypatch.setenv("TTS__RVC__MODEL_PATH", "models/rvc/egirl.pth")
+
+    settings = load_settings(_env_file=None)
+
+    assert settings.tts.rvc.enabled is True
+    assert settings.tts.rvc.pitch == 2
+    assert settings.tts.rvc.device == "cuda:0"
+    assert settings.tts.rvc.f0_method == "pm"
+    assert settings.tts.rvc.model_path.as_posix().endswith("models/rvc/egirl.pth")
+
+
 def test_vram_breakdown_sums_to_requested() -> None:
     """Разбивка по потребителям совпадает с суммарным запросом."""
     settings = load_settings(_env_file=None)

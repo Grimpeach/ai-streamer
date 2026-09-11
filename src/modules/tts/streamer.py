@@ -25,6 +25,7 @@ from src.core.tasks import cancel_task, consume_exception, join_task
 from src.modules.base import Module
 from src.modules.tts.engine import KokoroEngine, float_to_pcm16
 from src.modules.tts.player import SoundPlayer
+from src.modules.tts.rvc import RVCConverter
 
 __all__ = ["MockTTSModule", "TTSModule"]
 
@@ -54,6 +55,7 @@ class TTSModule(Module):
         self._current: asyncio.Task[None] | None = None
         self._abort = threading.Event()
         self._epoch = 0
+        self._rvc: RVCConverter | Any | None = None
 
     async def start(self) -> None:
         """Загружает модель синтеза, поднимает worker и подписки."""
@@ -63,7 +65,12 @@ class TTSModule(Module):
         self.bus.subscribe(self._on_preempt, EventType.PTT_PRESSED, name="tts.reset", preemptible=False)
         self._worker = asyncio.create_task(self._run_worker(), name="tts-worker")
         self._started = True
-        self.log.info("TTS готов: {} / голос '{}'", self.settings.engine, self.settings.voice)
+        self.log.info(
+            "TTS готов: {} / голос '{}'{}",
+            self.settings.engine,
+            self.settings.voice,
+            " + RVC" if self._rvc is not None else "",
+        )
 
     async def stop(self) -> None:
         """Гасит worker, освобождает VRAM синтезатора и выходной поток."""
@@ -80,6 +87,14 @@ class TTSModule(Module):
                 player.stop()
         engine = self._engine
         self._engine = None
+        rvc = self._rvc
+        self._rvc = None
+        if rvc is not None:
+            unload_rvc = getattr(rvc, "unload", None)
+            if unload_rvc is not None:
+                result = unload_rvc()
+                if asyncio.iscoroutine(result):
+                    await result
         unload = getattr(engine, "unload", None)
         if unload is not None:
             result = unload()
@@ -98,6 +113,10 @@ class TTSModule(Module):
             self._engine = engine
         elif hasattr(self._engine, "load") and not getattr(self._engine, "loaded", True):
             await self._engine.load()
+        if self.settings.rvc.enabled and self._rvc is None:
+            converter = RVCConverter(self.settings.rvc)
+            await converter.load()
+            self._rvc = converter
         if self._player is None:
             self._player = SoundPlayer(
                 sample_rate=self.settings.sample_rate,
@@ -190,7 +209,7 @@ class TTSModule(Module):
         index = 0
         try:
             with self.bus.preemption_scope(f"tts:{event.id}") as token:
-                async for pcm in self.synthesize(request.text, token):
+                async for pcm in self.synthesize(request.text, token, epoch):
                     token.raise_if_cancelled()
                     if self._abort.is_set():
                         break
@@ -220,7 +239,7 @@ class TTSModule(Module):
                 )
             )
 
-    async def synthesize(self, text: str, token: PreemptionToken) -> AsyncIterator[bytes]:
+    async def synthesize(self, text: str, token: PreemptionToken, epoch: int = 0) -> AsyncIterator[bytes]:
         """Синтез фразы: чанки PCM 16-bit + воспроизведение каждого чанка."""
         engine = self._engine
         if engine is None or not hasattr(engine, "stream"):
@@ -228,12 +247,23 @@ class TTSModule(Module):
 
         async for samples in engine.stream(text, self._abort):
             token.raise_if_cancelled()
-            if self._abort.is_set():
+            if self._abort.is_set() or epoch != self._epoch:
                 return
             audio = np.asarray(samples, dtype=np.float32)
+            if self._rvc is not None:
+                converted = await self._rvc.convert(
+                    audio,
+                    self.settings.sample_rate,
+                    abort=self._abort,
+                    epoch=epoch,
+                    current_epoch=lambda: self._epoch,
+                )
+                if converted is None or self._abort.is_set() or epoch != self._epoch:
+                    return
+                audio = converted
             if self._player is not None:
                 await asyncio.to_thread(self._player.play, audio, self._abort)
-                if self._abort.is_set():
+                if self._abort.is_set() or epoch != self._epoch:
                     return
             yield float_to_pcm16(audio)
 
@@ -252,8 +282,9 @@ class MockTTSModule(TTSModule):
         self._engine = "mock"
         self._player = None
 
-    async def synthesize(self, text: str, token: PreemptionToken) -> AsyncIterator[bytes]:
+    async def synthesize(self, text: str, token: PreemptionToken, epoch: int = 0) -> AsyncIterator[bytes]:
         """Отдаёт тишину порциями, как будто произносит текст в реальном времени."""
+        _ = epoch
         samples_per_chunk = int(self.settings.sample_rate * self.chunk_duration_s)
         chunks = max(1, round(len(text) / 12))
         for _ in range(chunks):

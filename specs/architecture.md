@@ -3,7 +3,7 @@
 ## Модули и Распределение памяти (RTX 4080 16GB)
 
 - LLM: Qwen 2.5 14B (vLLM / llama.cpp) ~ 8-9 GB VRAM. Модуль — [llm.md](llm.md).
-- TTS: Kokoro-82M (streaming, sounddevice) ~ 0.5–2.5 GB VRAM. Модуль — [tts.md](tts.md).
+- TTS: Kokoro-82M (streaming, sounddevice) ~ 0.5–2.5 GB VRAM, опционально RVC. Модуль — [tts.md](tts.md).
 - STT: Faster-Whisper large-v3 (PTT, translate→English) ~ 3 GB VRAM
 - Memory: Redis + Qdrant (e5-base ~0.4 GB). Модуль — [memory.md](memory.md).
 - VTube Studio / OBS: ~ 2-3 GB VRAM

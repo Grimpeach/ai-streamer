@@ -1,8 +1,8 @@
 # Спецификация: TTS (Фаза 5)
 
 Реализация: `src/modules/tts/streamer.py`, движок — `engine.py` (Kokoro),
-воспроизведение — `player.py` (sounddevice). Настройки — `TTSSettings`
-(`TTS__ENGINE`, `TTS__VOICE`, `TTS__LANG_CODE`).
+RVC — `rvc.py`, воспроизведение — `player.py` (sounddevice). Настройки —
+`TTSSettings` / `RVCSettings` (`TTS__ENGINE`, `TTS__RVC__ENABLED`).
 
 ## 1. Движок Kokoro
 
@@ -22,16 +22,30 @@
 | `voice` | `TTS__VOICE` (по умолчанию `af_heart`) |
 | `lang_code` | `TTS__LANG_CODE` или первая буква голоса (`af_*` → `a`) |
 | `device` | `TTS__DEVICE` (`auto` / `cuda` / `cpu`) |
+| `output_device` | `TTS__OUTPUT_DEVICE` (индекс/имя PortAudio, пусто = default) |
+| `rvc.enabled` | `TTS__RVC__ENABLED` (по умолчанию выкл.) |
+| `rvc.model_path` | `TTS__RVC__MODEL_PATH` (`.pth`) |
+| `rvc.index_path` | `TTS__RVC__INDEX_PATH` (`.index`) |
+| `rvc.pitch` | `TTS__RVC__PITCH` (полутона, `f0up_key`) |
+| `rvc.device` | `TTS__RVC__DEVICE` (по умолчанию `cuda:0`) |
+| `rvc.f0_method` | `TTS__RVC__F0_METHOD` (`rmvpe` / `pm`) |
 
 Официальный Kokoro-82M не имеет русской озвучки. Имя `ru_female_1` из ранних
 спеков алиасится на `af_heart`. LLM отвечает по-английски — это совпадает
-с голосом.
+с голосом. RVC поверх Kokoro даёт тембр персонажа.
 
 ## 2. Воспроизведение
 
 Выходной `sounddevice.OutputStream` открывается один раз и живёт до остановки
-модуля. Каждый чанк Kokoro кладётся в PCM-буфер колбэка; публикация
-`tts.chunk` (PCM 16-bit) остаётся для логов и оверлеев.
+модуля. Устройство задаётся `TTS__OUTPUT_DEVICE` и передаётся в `SoundPlayer(device=...)`.
+Каждый чанк Kokoro (после опционального RVC) кладётся в PCM-буфер
+колбэка; публикация `tts.chunk` (PCM 16-bit) остаётся для логов и оверлеев.
+
+Если `TTS__RVC__ENABLED=true`, при старте TTS один раз загружается
+`rvc_python.infer.RVCInference` (`.pth` + `.index`) и держится в памяти.
+Чанк Kokoro (numpy, 24 кГц) конвертируется синхронным инференсом в отдельном
+потоке (`ThreadPoolExecutor` / не event loop). `f0_method` — `rmvpe` или `pm`.
+Частота для плеера снова 24 кГц.
 
 ## 3. Прерывание
 
@@ -46,10 +60,12 @@
 5. Генератор Kokoro закрывается (`iterator.close()`), worker дожидается
    потока инференса — GPU/CPU свободны до следующего STT. `Future.cancel()`
    уже идущий CUDA-кернел не останавливает.
+6. Если RVC ещё считает чанк, результат после abort/смены epoch **отбрасывается**
+   и в очередь sounddevice не попадает.
 
 ## 4. Проверка
 
-* `tests/test_tts.py` — очередь, abort плеера, event loop не блокируется.
+* `tests/test_tts.py` — очередь, abort плеера, RVC до плеера, отброс чанка RVC по PTT.
 * `tests/test_pipeline.py` — чат → LLM → mock-TTS и тишина после PTT.
 
 Живая проверка полного конвейера:

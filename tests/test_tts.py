@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
+import pytest
 
-from src.core.config import PTTSettings, TTSSettings
+from src.core.config import PTTSettings, RVCSettings, TTSSettings
 from src.core.event_bus import EventBus
 from src.core.events import Event, EventType, TextRequest
 from src.modules.ptt.hotkey import MockPushToTalkModule
 from src.modules.tts.engine import KokoroEngine, float_to_pcm16, resolve_lang_code, resolve_voice
+from src.modules.tts.rvc import RVCConverter
 from src.modules.tts.streamer import TTSModule
 
 
@@ -37,11 +41,12 @@ class _FakePlayer:
         self.played = 0
         self.stops = 0
         self.block_s = block_s
+        self.last_audio: np.ndarray | None = None
 
     def stop(self) -> None:
         self.stops += 1
 
-    def play(self, _audio: np.ndarray, abort: Any) -> None:
+    def play(self, audio: np.ndarray, abort: Any) -> None:
         deadline = time.monotonic() + self.block_s
         while time.monotonic() < deadline:
             if abort.is_set():
@@ -49,6 +54,7 @@ class _FakePlayer:
             time.sleep(0.01)
         if abort.is_set():
             return
+        self.last_audio = np.asarray(audio)
         self.played += 1
 
 
@@ -233,3 +239,111 @@ async def test_kokoro_waits_for_producer_and_closes_generator_on_abort() -> None
         assert closed.wait(timeout=2)
     finally:
         engine._executor.shutdown(wait=True)
+
+
+class _FakeRVC:
+    """Заглушка конвертера: помечает чанк и умеет тормозить, как живой инференс."""
+
+    def __init__(self, *, delay_s: float = 0.0, mark: float = 0.5) -> None:
+        self.delay_s = delay_s
+        self.mark = mark
+        self.calls = 0
+        self.started = asyncio.Event()
+
+    async def convert(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        *,
+        abort: Any,
+        epoch: int,
+        current_epoch: Any,
+    ) -> np.ndarray | None:
+        _ = sample_rate
+        self.calls += 1
+        self.started.set()
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        if abort.is_set() or epoch != current_epoch():
+            return None
+        out = np.asarray(audio, dtype=np.float32).copy()
+        if out.size:
+            out[0] = self.mark
+        return out
+
+
+async def test_rvc_runs_before_playback() -> None:
+    """Чанк Kokoro проходит через RVC до sounddevice."""
+    player = _FakePlayer()
+    rvc = _FakeRVC(mark=0.75)
+    bus = EventBus()
+    tts = TTSModule(bus, TTSSettings(engine="kokoro"), engine=_FakeEngine(), player=player)
+
+    async with bus:
+        await tts.start()
+        tts._rvc = rvc
+        try:
+            await bus.publish(Event(type=EventType.TTS_REQUEST, payload=TextRequest(text="hi")))
+            await bus.wait_idle()
+        finally:
+            await tts.stop()
+
+    assert rvc.calls == 1
+    assert player.played == 1
+    assert player.last_audio is not None
+    assert player.last_audio.reshape(-1)[0] == pytest.approx(0.75)
+
+
+async def test_rvc_chunk_dropped_on_preempt() -> None:
+    """PTT во время RVC не должен отдать чанк в плеер."""
+    player = _FakePlayer()
+    rvc = _FakeRVC(delay_s=0.25)
+    bus = EventBus()
+    tts = TTSModule(bus, TTSSettings(), engine=_FakeEngine(), player=player)
+    ptt = MockPushToTalkModule(bus, PTTSettings())
+
+    async with bus:
+        await tts.start()
+        await ptt.start()
+        tts._rvc = rvc
+        try:
+            await bus.publish(Event(type=EventType.TTS_REQUEST, payload=TextRequest(text="hi")))
+            await asyncio.wait_for(rvc.started.wait(), timeout=2)
+            await ptt.say("стоп")
+            await bus.wait_idle()
+        finally:
+            await tts.stop()
+            await ptt.stop()
+
+    assert player.played == 0
+    assert tts.pending_sentences == 0
+
+
+async def test_rvc_converter_discards_result_after_preempt() -> None:
+    """Результат синхронного инференса не возвращается, если за время расчёта сменился epoch."""
+    converter = RVCConverter(RVCSettings())
+    converter._infer = object()
+    converter._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-rvc")
+    abort = threading.Event()
+    epoch = {"n": 1}
+
+    def slow_sync(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        _ = audio, sample_rate
+        time.sleep(0.05)
+        abort.set()
+        epoch["n"] += 1
+        return np.ones(8, dtype=np.float32)
+
+    converter.convert_sync = slow_sync  # type: ignore[method-assign]
+    try:
+        result = await converter.convert(
+            np.zeros(8, dtype=np.float32),
+            24_000,
+            abort=abort,
+            epoch=1,
+            current_epoch=lambda: epoch["n"],
+        )
+    finally:
+        converter._executor.shutdown(wait=True)
+
+    assert result is None
